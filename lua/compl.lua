@@ -102,6 +102,24 @@ function M.setup(opts)
 		end,
 	})
 
+	-- Neovim's built-in LSP completion handler processes the same completion
+	-- item and expects `completionProvider` to be a table. compl handles
+	-- CompleteDone itself, so remove the built-in handler to avoid double side
+	-- effects and crashes caused by the internal snippet server.
+	vim.api.nvim_create_autocmd("CompleteDonePre", {
+		group = group,
+		callback = function(args)
+			local lsp_group = "nvim.lsp.completion_" .. args.buf
+			local ok, autocmds = pcall(vim.api.nvim_get_autocmds, {
+				group = lsp_group,
+				event = "CompleteDone",
+			})
+			if ok and #autocmds > 0 then
+				pcall(vim.api.nvim_clear_autocmds, { group = lsp_group, event = "CompleteDone" })
+			end
+		end,
+	})
+
 	if M._opts.info.enable then
 		M._info.bufnr = vim.api.nvim_create_buf(false, true)
 		vim.api.nvim_buf_set_name(M._info.bufnr, "Compl:InfoWindow")
@@ -387,7 +405,7 @@ function M._start_info()
 	if completion_item.documentation then
 		M._open_info_window(completion_item)
 	else
-		local ok, request_id = client.request("completionItem/resolve", completion_item, function(err, result)
+		local ok, request_id = client:request("completionItem/resolve", completion_item, function(err, result)
 			if not err and result.documentation then
 				M._open_info_window(result)
 			end
@@ -395,7 +413,7 @@ function M._start_info()
 		if ok then
 			local cancel_fn = function()
 				if client then
-					client.cancel_request(request_id)
+					client:cancel_request(request_id)
 				end
 			end
 			table.insert(M._ctx.pending_requests, cancel_fn)
@@ -512,29 +530,42 @@ function M._on_completedone()
 		vim.snippet.expand(vim.tbl_get(completion_item, "textEdit", "newText") or completion_item.insertText or "")
 	end
 
+	local function execute_command()
+		if completion_item.command then
+			client:exec_cmd(completion_item.command, { bufnr = bufnr })
+		end
+	end
+
 	-- Apply additionalTextEdits
 	local edits = completion_item.additionalTextEdits or {}
 	if next(edits) then
 		vim.lsp.util.apply_text_edits(edits, bufnr, client.offset_encoding)
+		execute_command()
 	else
 		-- TODO fix bug
 		-- Reproduce:
 		-- 1. Insert newline(s) right after completing an item without exiting insert mode.
 		-- 2. Undo changes.
 		-- Result: Completed item is not removed without the undo changes.
-		local ok, request_id = client.request("completionItem/resolve", completion_item, function(err, result)
+		local ok, request_id = client:request("completionItem/resolve", completion_item, function(err, result)
 			edits = (not err) and (result.additionalTextEdits or {}) or {}
 			if next(edits) then
 				vim.lsp.util.apply_text_edits(edits, bufnr, client.offset_encoding)
 			end
+			if not err and result and result.command then
+				completion_item.command = result.command
+			end
+			execute_command()
 		end)
 		if ok then
 			local cancel_fn = function()
 				if client then
-					client.cancel_request(request_id)
+					client:cancel_request(request_id)
 				end
 			end
 			table.insert(M._ctx.pending_requests, cancel_fn)
+		else
+			execute_command()
 		end
 	end
 end
@@ -549,11 +580,12 @@ function M._start_snippet()
 				table.insert(M._snippet.items, {
 					detail = "snippet",
 					label = prefix,
+					filterText = prefix,
 					kind = vim.lsp.protocol.CompletionItemKind["Snippet"],
-					documentation = {
+					documentation = snippet.description and {
 						value = snippet.description,
 						kind = vim.lsp.protocol.MarkupKind.Markdown,
-					},
+					} or nil,
 					insertTextFormat = vim.lsp.protocol.InsertTextFormat.Snippet,
 					insertText = type(snippet.body) == "table" and table.concat(snippet.body, "\n") or snippet.body,
 				})
@@ -589,7 +621,10 @@ end
 
 function M._start_snippet_server()
 	if M._snippet.client_id then
-		vim.lsp.stop_client(M._snippet.client_id)
+		local client = vim.lsp.get_client_by_id(M._snippet.client_id)
+		if client then
+			client:stop()
+		end
 		M._snippet.client_id = nil
 	end
 
@@ -654,11 +689,14 @@ function M._make_lsp_server(completion_items)
 			if method == "initialize" then
 				callback(nil, {
 					capabilities = {
-						completionProvider = true, -- the server has to provide completion support (true or pass options table)
+						-- Must be a table: Neovim 0.12 accesses .resolveProvider.
+						completionProvider = {},
 					},
 				})
 			elseif method == "textDocument/completion" then
 				callback(nil, completion_items)
+			elseif method == "completionItem/resolve" then
+				callback(nil, params)
 			elseif method == "shutdown" then
 				callback(nil, nil)
 			end
