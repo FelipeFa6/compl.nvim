@@ -13,6 +13,10 @@ M._opts = {
 	snippet = {
 		enable = false,
 		paths = {},
+		-- When true, snippets are only offered when a non-empty word prefix has
+		-- been typed. This prevents the menu from being flooded with every
+		-- snippet right after a `.`, `::`, `@`, etc.
+		require_prefix = true,
 	},
 }
 
@@ -69,6 +73,7 @@ function M.setup(opts)
 		["snippet"] = { M._opts.snippet, "t" },
 		["snippet.enable"] = { M._opts.snippet.enable, "b" },
 		["snippet.paths"] = { M._opts.snippet.paths, "t" },
+		["snippet.require_prefix"] = { M._opts.snippet.require_prefix, "b" },
 	}
 
 	local group = vim.api.nvim_create_augroup("Compl", { clear = true })
@@ -264,20 +269,26 @@ function _G.Compl.completefunc(findstart, base)
 			local items = response.result.items or response.result or {}
 
 			for _, item in pairs(items) do
-				local text = item.filterText
-					or (vim.tbl_get(item, "textEdit", "newText") or item.insertText or item.label or "")
-				if M._opts.completion.fuzzy then
-					local fuzzy = vim.fn.matchfuzzy({ text }, base)
-					if vim.startswith(text, base:sub(1, 1)) and (base == "" or next(fuzzy)) then
-						table.insert(matches, { client_id = client_id, item = item })
+				local is_snippet = item.kind == vim.lsp.protocol.CompletionItemKind.Snippet
+
+				-- Skip snippets when no word prefix has been typed yet (e.g. right
+				-- after a `.`), unless `snippet.require_prefix` is disabled.
+				if not (M._opts.snippet.require_prefix and base == "" and is_snippet) then
+					local text = item.filterText
+						or (vim.tbl_get(item, "textEdit", "newText") or item.insertText or item.label or "")
+					if M._opts.completion.fuzzy then
+						local fuzzy = vim.fn.matchfuzzy({ text }, base)
+						if vim.startswith(text, base:sub(1, 1)) and (base == "" or next(fuzzy)) then
+							table.insert(matches, { client_id = client_id, item = item })
+						end
+					else
+						if vim.startswith(text, base) then
+							table.insert(matches, { client_id = client_id, item = item })
+						end
 					end
-				else
-					if vim.startswith(text, base) then
-						table.insert(matches, { client_id = client_id, item = item })
-					end
+					-- Add an extra custom field to mark exact matches
+					item.exact = text == base
 				end
-				-- Add an extra custom field to mark exact matches
-				item.exact = text == base
 			end
 		end
 	end

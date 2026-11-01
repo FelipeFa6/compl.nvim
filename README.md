@@ -44,6 +44,10 @@ require("compl").setup {
       -- Optional: point to the package.json manifest of an installed snippet collection.
       vim.fn.stdpath "data" .. "/site/pack/core/opt/friendly-snippets",
     },
+    -- When true (default), snippets are only offered once a non-empty word
+    -- prefix has been typed. This keeps them from flooding the menu right after
+    -- a `.`, `::`, `@`, etc. Set to false to always show snippets.
+    require_prefix = true,
   },
 }
 ```
